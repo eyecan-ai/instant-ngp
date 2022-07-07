@@ -1,91 +1,21 @@
 from typing import Literal, Optional, Sequence, Union
 import pydantic
-import rich
 import typer as t
 from pathlib import Path
 import numpy as np
 import transforms3d
 import cv2
 from fastapi.applications import FastAPI
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi import WebSocket, FastAPI
-import cv2
 import base64
-import numpy as np
-from fastapi.responses import HTMLResponse
-import albumentations as A
-import pathlib
-
-html = """
-<!DOCTYPE html>
-<html>
-    <head>
-        <title>Chat</title>
-    </head>
-    <body>
-        <h1>WebSocket Chat</h1>
-        <form action="" onsubmit="sendMessage(event)">
-            <input type="text" id="messageText" autocomplete="off"/>
-            <button>Send</button>
-        </form>
-        <ul id='messages'>
-        </ul>
-        <canvas id="viewport" width="800" height="600"></canvas>
-        <img id="rviewport" width="800" height="600"></img>
-
-        <script>
-            var ws = new WebSocket("ws://localhost:8000/ws");
-            ws.binaryType = "arraybuffer";
-
-            ws.onopen = function(e) {
-                console.log("[open] Connection established");
-            };
-            ws.onmessage = function(event) {
-                const arrayBuffer = event.data;
-                let base_image = new Image();
-                base_image.src = 'data:image/jpg;base64,' + arrayBuffer;
-
-                var canvas = document.getElementById('viewport'),
-                context = canvas.getContext('2d');  
-                base_image.onload = function(){
-                    context.drawImage(base_image, 0, 0,800,800);
-                }
-            };
-            function sendMessage(event) {
-                var input = document.getElementById("messageText")
-                ws.send(input.value)
-                input.value = ''
-                event.preventDefault()
-            }
-
-            setInterval(function() {
-                ws.send('')
-            }, 10);
-        </script>
-    </body>
-</html>
-"""
+import json
+import uvicorn
+import threading
 
 
 def image_to_base64(img: np.ndarray) -> bytes:
-    """Given a numpy 2D array, returns a JPEG image in base64 format"""
-
-    # using opencv 2, there are others ways
     img_buffer = cv2.imencode(".jpg", img)[1]
     return base64.b64encode(img_buffer).decode("utf-8")
-
-
-def get_image(volume, index: int):
-    image = volume[:, :, index]
-    return image_to_base64(image)
-
-
-def load_image(path: str):
-    img = cv2.imread(path)
-    t = A.Compose([A.ShiftScaleRotate(p=1)])
-    img = t(image=img)["image"]
-    return image_to_base64(img)
 
 
 class Transforms3DUtils(object):
@@ -130,76 +60,47 @@ class Action(pydantic.BaseModel):
 
 
 def navigate_neural_twin(
-    transforms_file: Path = t.Option(
-        ..., help="transform json file | single pose numpy txt file"
-    ),
+    transforms_file: Path = t.Option(..., help="transform json file "),
     start_pose_index: int = t.Option(0, help="start pose index"),
     neural_twin_file: Path = t.Option(..., help="Neural Twin File"),
-    orbit: bool = t.Option(False, help="Orbit around the start pose"),
+    debug: bool = t.Option(False, help="Debug mode"),
     spp: int = t.Option(1, help="Number of Samples per Pixel used for rendering"),
     ngp_build_folder: Path = t.Option("build", help="Folder in which Instant is built"),
-    output_folder: str = t.Option(
-        "", help="Folder in which to save the rendered images"
-    ),
 ):
 
     import sys
 
     sys.path.append(str(ngp_build_folder.absolute()))
     import pyngp as ngp  # type: ignore
-    import numpy as np
-    import json
-    import cv2
-    import uvicorn
-    import threading
 
-    # Selecting mode
+    ########################################
+    # Testbed initialization
+    ########################################
     mode = ngp.TestbedMode.Nerf
     testbed = ngp.Testbed(mode)
-
-    if transforms_file.suffix == ".json":
-        transforms = json.load(open(transforms_file))
-        # Start pose
-        frame = transforms["frames"][start_pose_index]
-        T = np.array(frame["transform_matrix"])
-    elif transforms_file.suffix == ".txt":
-        T = np.loadtxt(transforms_file)
-
     testbed.load_snapshot(str(neural_twin_file))
     testbed.exposure = 0
     testbed.background_color = np.array([1, 1, 1, 1])
 
+    ########################################
+    # Start Pose
+    ########################################
+    transforms = json.load(open(transforms_file))
+    frame = transforms["frames"][start_pose_index]
+    T = np.array(frame["transform_matrix"])
+
+    ########################################
     # Camera Parameters
+    ########################################
     width, height = 512, 512
-    print("SIZE", width, height)
     testbed.fov_axis = 0
     testbed.fov = 40
-    downsample_while_moving = 1
 
+    ########################################
+    # Navigation Parameetrs
+    ########################################
     rotational_velocity = 0.2
     translational_velocity = 0.2
-
-    # shared image
-    shared_image = np.zeros((height, width, 3), dtype=np.uint8)
-
-    app = FastAPI()
-
-    folder = pathlib.Path(__file__).parent.resolve()
-
-    # @app.get("/")
-    # async def get():
-    #     html = "".join(open(folder / "html" / "index.html").readlines())
-    #     return HTMLResponse(html)
-
-    received_keys = []
-
-    navigation_keys_map = {
-        "D": {"world": Transforms3DUtils.rot_z(rotational_velocity)},
-        "A": {"world": Transforms3DUtils.rot_z(-rotational_velocity)},
-        "S": {"world": Transforms3DUtils.rot_y(rotational_velocity)},
-        "W": {"world": Transforms3DUtils.rot_y(-rotational_velocity)},
-        "R": "reset",
-    }
 
     navigation_keys_map = {
         "D": Action(
@@ -235,6 +136,18 @@ def navigate_neural_twin(
         "R": Action(command="reset", transform=None),
     }
 
+    ########################################
+    # Buffered data
+    ########################################
+    shared_image = np.zeros((height, width, 3), dtype=np.uint8)
+    received_keys = []
+
+    ########################################
+    # Web Service
+    ########################################
+
+    app = FastAPI()
+
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         print("started")
@@ -263,8 +176,9 @@ def navigate_neural_twin(
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
 
-    # Add UnderfolderAPI microservice to main app
-    # app.include_router(endpoint)
+    ###########################################
+    # Rendering Loop
+    ###########################################
 
     while True:
 
@@ -272,13 +186,17 @@ def navigate_neural_twin(
         rw, rh = width, height
 
         try:
+            # Pick action based on last received key
             action = navigation_keys_map[received_keys.pop(0)]
 
+            # Textual Actions
             if action.transform is None:
                 if action.command == "reset":
                     T = np.array(frame["transform_matrix"])
                 else:
                     raise Exception("Unknown action")
+
+            # Geometry Actions
             else:
                 dt = action.transform
                 if action.transform_type == "world":
@@ -308,10 +226,13 @@ def navigate_neural_twin(
             np.uint8
         )
         shared_image = output_image.copy()
-        # cv2.imshow("rgb", output_image)
-        # k = cv2.waitKey(1)
-        # if k == ord("q"):
-        #     break
+
+        # Debug
+        if debug:
+            cv2.imshow("rgb", output_image)
+            k = cv2.waitKey(1)
+            if k == ord("q"):
+                break
 
 
 if __name__ == "__main__":
