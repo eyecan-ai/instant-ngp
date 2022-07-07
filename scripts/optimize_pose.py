@@ -45,7 +45,7 @@ def convert_image(img):
     return img[None].to(DEVICE)
 
 
-def compute_flow(flow_model, image1, image2):
+def compute_flow(flow_model, image1, image2, iters=20):
 
     image1 = convert_image(image1)
     image2 = convert_image(image2)
@@ -54,7 +54,7 @@ def compute_flow(flow_model, image1, image2):
         padder = InputPadder(image1.shape)
         image1, image2 = padder.pad(image1, image2)
 
-        flow_low, flow_up = flow_model(image1, image2, iters=20, test_mode=True)
+        flow_low, flow_up = flow_model(image1, image2, iters=iters, test_mode=True)
 
         return flow_up
 
@@ -199,8 +199,9 @@ def optimize_pose(
 
         flow = compute_flow(
             flow_model,
-            end_image * 255.0,
             start_image * 255,
+            end_image * 255.0,
+            iters=5,
         )
         # flow_BA = compute_flow(flow_model, end_image * 255, start_image * 255)
 
@@ -222,11 +223,14 @@ def optimize_pose(
         cv2.imshow("stack", stack)
         cv2.waitKey(1)
 
-        flow_mag = torch.norm(flow, dim=1).mean()
+        # flow_mag = torch.norm(flow, dim=1).mean()
+        flow_mag = torch.abs(flow).mean()
+        # flow_mag = torch.abs(flow).mean()
         # mag_BA = torch.norm(flow_BA, dim=1).mean()
 
-        fitness = (flow_mag).item()
-        # fitness += 255 * np.abs(start_image - end_image).mean()
+        variance = 1.0 - end_image.var()
+        fitness = (flow_mag).item() + 1000 * variance
+        # fitness = 255 * np.abs(start_image - end_image).mean()
 
         print("F", fitness)
 
@@ -234,15 +238,15 @@ def optimize_pose(
         # return (start_image - end_image).mean()
 
     rotational_weight = 1
-    rotational_bound = rotational_weight * np.pi * 2
-    translational_bound = 2
+    rotational_bound = rotational_weight * np.pi * 5
+    translational_bound = 5
 
-    optimizer = ng.optimizers.TwoPointsDE(
+    optimizer = ng.optimizers.NGOpt(
         parametrization=ng.p.Array(init=[0, 0, 0, 0, 0, 0]).set_bounds(
-            [-3, -3, -3] + [-rotational_bound] * 3,
-            [3, 3, 3] + [rotational_bound] * 3,
+            [-translational_bound] * 3 + [-rotational_bound] * 3,
+            [translational_bound] * 3 + [rotational_bound] * 3,
             # method="tanh",
-            method="constraint",
+            method="bouncing",
         ),
         budget=300,
     )

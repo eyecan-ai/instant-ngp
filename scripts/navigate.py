@@ -64,12 +64,14 @@ def navigate_neural_twin(
     ),
     start_pose_index: int = t.Option(0, help="start pose index"),
     neural_twin_file: Path = t.Option(..., help="Neural Twin File"),
+    orbit: bool = t.Option(False, help="Orbit around the start pose"),
     spp: int = t.Option(1, help="Number of Samples per Pixel used for rendering"),
     ngp_build_folder: Path = t.Option("build", help="Folder in which Instant is built"),
     output_folder: str = t.Option(
         "", help="Folder in which to save the rendered images"
     ),
 ):
+
     import sys
 
     sys.path.append(str(ngp_build_folder.absolute()))
@@ -93,8 +95,8 @@ def navigate_neural_twin(
         T = np.loadtxt(transforms_file)
 
     testbed.load_snapshot(str(neural_twin_file))
-    # testbed.exposure = 0
-    # testbed.background_color = np.array([0, 0, 0, 0])
+    testbed.exposure = 0
+    testbed.background_color = np.array([1, 1, 1, 1])
 
     # Camera Parameters
     width, height = 512, 512
@@ -134,7 +136,11 @@ def navigate_neural_twin(
         for key, action in navigation_keys_map.items():
             if k == ord(key):
                 if isinstance(action, np.ndarray):
-                    T = np.dot(T, action)
+
+                    if not orbit:
+                        T = np.dot(T, action)
+                    else:
+                        T = np.dot(action, T)
 
                     # downsample if moving
                     rw = width // downsample_while_moving
