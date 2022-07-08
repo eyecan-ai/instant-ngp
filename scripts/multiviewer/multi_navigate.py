@@ -181,8 +181,16 @@ def navigate_neural_twin(
         rendered_image_first = renderer_first.render()[:, :, :3]
         rendered_image_second = renderer_second.render()[:, :, :3]
 
+        difference = np.abs(rendered_image_first - rendered_image_second)
+
         # Show
-        stack = np.hstack((OUT(rendered_image_first), OUT(rendered_image_second)))
+        stack = np.hstack(
+            (
+                OUT(rendered_image_first),
+                OUT(rendered_image_second),
+                OUT(difference),
+            )
+        )
 
         cv2.imshow("multiview", stack)
         # wr(output_image)
