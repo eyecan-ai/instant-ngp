@@ -94,7 +94,7 @@ class Transforms3DUtils(object):
 def optimize_pose(
     transforms_file: Path = t.Option(..., help="transform json file "),
     start_pose_index: int = t.Option(0, help="start pose index"),
-    end_pose_index: int = t.Option(10, help="end pose index"),
+    end_pose_index: int = t.Option(4, help="end pose index"),
     neural_twin_file: Path = t.Option(..., help="Neural Twin File"),
     spp: int = t.Option(1, help="Number of Samples per Pixel used for rendering"),
     ngp_build_folder: Path = t.Option("build", help="Folder in which Instant is built"),
@@ -119,16 +119,22 @@ def optimize_pose(
     end_frame = transforms["frames"][end_pose_index]
     print("Loading poses", start_pose_index, end_pose_index)
 
+    correction = np.eye(4)
+    correction[2, 3] = -3
+
     T_start = np.array(start_frame["transform_matrix"])
     T_end = np.array(end_frame["transform_matrix"])
 
-    L = np.eye(4)
-    L[1, 3] = 0.4
-    T_end = T_end @ L
+    T_start = T_start @ correction
+    T_end = T_end @ correction
+
+    # L = np.eye(4)
+    # L[1, 3] = 0.4
+    # T_end = T_end @ L
 
     testbed.load_snapshot(str(neural_twin_file))
     # testbed.exposure = 0
-    # testbed.background_color = np.array([0, 0, 0, 0])
+    testbed.background_color = np.array([1, 1, 1, 1])
 
     # FLow aargsa
     args = {
@@ -138,15 +144,9 @@ def optimize_pose(
         "alternate_corr": False,
     }
     args = Box(args)
-    flow_model = torch.nn.DataParallel(RAFT(args))
-    flow_model.load_state_dict(torch.load(args.model))
-
-    flow_model = flow_model.module
-    flow_model.to(DEVICE)
-    flow_model.eval()
 
     # Camera Parameters
-    width, height = 256, 256
+    width, height = 384, 384
     print("SIZE", width, height)
     testbed.fov_axis = 0
     testbed.fov = 40
@@ -169,19 +169,19 @@ def optimize_pose(
     cv2.waitKey(0)
 
     def convert_to_pose(x):
-        x = x * [
-            1,
-            1,
-            1,
-            1 / 10,
-            1 / 10,
-            1 / 10,
-        ]
+        # x = x * [
+        #     1,
+        #     1,
+        #     1,
+        #     1,
+        #     1,
+        #     1,
+        # ]
         p = x[:3]
-        euler = x[3:6]  # * 0.01
+        euler = [0, 0, 0]  # x[3:6]  # * 0.01
 
         # q =  w, x, y, z
-        rot = transforms3d.euler.euler2mat(euler[0], euler[1], euler[2])
+        rot = transforms3d.euler.euler2mat(euler[0], euler[1], euler[2], "szyx")
         DT = np.eye(4)
         DT[:3, :3] = rot
         DT[:3, 3] = p
@@ -193,20 +193,10 @@ def optimize_pose(
         # print(x)
         # Render current pose
         DT = convert_to_pose(x)
-        current = np.dot(T_end, DT)  # Transforms3DUtils.translation(x)
-
+        current = np.dot(np.linalg.inv(T_end), DT)  # Transforms3DUtils.translation(x)
+        current = np.linalg.inv(current)
+        # current = np.dot(T_end, DT)
         end_image = render_frame(current, height, width)
-
-        flow = compute_flow(
-            flow_model,
-            start_image * 255,
-            end_image * 255.0,
-            iters=5,
-        )
-        # flow_BA = compute_flow(flow_model, end_image * 255, start_image * 255)
-
-        flow_color = viz(flow, "ab")
-        # viz(flow_BA, "ba")
 
         blend = 0.5 * (start_image + end_image)
 
@@ -216,46 +206,89 @@ def optimize_pose(
                 OUTPUT(target_image),
                 OUTPUT(end_image),
                 OUTPUT(blend),
-                flow_color,
             )
         )
 
-        cv2.imshow("stack", stack)
-        cv2.waitKey(1)
+        try:
+            sift = cv2.SIFT_create()
+            # find the keypoints and descriptors with SIFT
+            img1 = (start_image * 255).astype(np.uint8)
+            img2 = (end_image * 255).astype(np.uint8)
+            kp1, des1 = sift.detectAndCompute(img1, None)
+            kp2, des2 = sift.detectAndCompute(img2, None)
+            # BFMatcher with default params
+            bf = cv2.BFMatcher()
+            matches = bf.knnMatch(des1, des2, k=2)
+            # Apply ratio test
+            good = []
+            for m, n in matches:
+                if m.distance < 0.6 * n.distance:
+                    good.append([m])
 
-        # flow_mag = torch.norm(flow, dim=1).mean()
-        flow_mag = torch.abs(flow).mean()
-        # flow_mag = torch.abs(flow).mean()
-        # mag_BA = torch.norm(flow_BA, dim=1).mean()
+            match_distances = 0.0
+            for g in good:
+                p1 = np.array(kp1[g[0].queryIdx].pt)
+                p2 = np.array(kp2[g[0].trainIdx].pt)
+                match_distances += np.linalg.norm(p1 - p2) * (1 / g[0].distance)
 
-        variance = 1.0 - end_image.var()
-        fitness = (flow_mag).item() + 1000 * variance
-        # fitness = 255 * np.abs(start_image - end_image).mean()
+            match_distances /= len(good)
 
-        print("F", fitness)
+            if len(good) == 0:
+                return np.inf
+            # cv.drawMatchesKnn expects list of lists as matches.
+            img3 = cv2.drawMatchesKnn(
+                img1,
+                kp1,
+                img2,
+                kp2,
+                good,
+                None,
+                flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+            )
+            cv2.imshow("matches", img3)
+            cv2.imshow("stack", stack)
+            cv2.waitKey(1)
 
-        return fitness
+            fitness = match_distances
+            print("F", fitness)
+
+            return fitness
+        except:
+            return np.inf
         # return (start_image - end_image).mean()
 
     rotational_weight = 1
-    rotational_bound = rotational_weight * np.pi * 5
-    translational_bound = 5
+    rotational_bound = rotational_weight * np.pi * 2
+    translational_bound = 3
 
-    optimizer = ng.optimizers.NGOpt(
+    # Choose optimizer -> https://facebookresearch.github.io/nevergrad/optimization.html#choosing-an-optimizer
+    optimizer = ng.optimizers.CMA(
         parametrization=ng.p.Array(init=[0, 0, 0, 0, 0, 0]).set_bounds(
-            [-translational_bound] * 3 + [-rotational_bound] * 3,
-            [translational_bound] * 3 + [rotational_bound] * 3,
+            [
+                -translational_bound,
+                -translational_bound,
+                -translational_bound,
+                -rotational_bound,
+                -rotational_bound,
+                -rotational_bound,
+            ],
+            [
+                translational_bound,
+                translational_bound,
+                translational_bound,
+                rotational_bound,
+                rotational_bound,
+                rotational_bound,
+            ],
             # method="tanh",
             method="bouncing",
         ),
-        budget=300,
+        budget=3000,
     )
 
     while True:
         cv2.imshow("start", OUTPUT(start_image))
         cv2.waitKey(0)
-
-        # Choose optimizer -> https://facebookresearch.github.io/nevergrad/optimization.html#choosing-an-optimizer
 
         recommendation = optimizer.minimize(pose_optimizer)  # best value
         print(recommendation.value)
