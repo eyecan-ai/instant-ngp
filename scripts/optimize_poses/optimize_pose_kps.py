@@ -94,7 +94,7 @@ class Transforms3DUtils(object):
 def optimize_pose(
     transforms_file: Path = t.Option(..., help="transform json file "),
     start_pose_index: int = t.Option(0, help="start pose index"),
-    end_pose_index: int = t.Option(4, help="end pose index"),
+    end_pose_index: int = t.Option(10, help="end pose index"),
     neural_twin_file: Path = t.Option(..., help="Neural Twin File"),
     spp: int = t.Option(1, help="Number of Samples per Pixel used for rendering"),
     ngp_build_folder: Path = t.Option("build", help="Folder in which Instant is built"),
@@ -146,7 +146,7 @@ def optimize_pose(
     args = Box(args)
 
     # Camera Parameters
-    width, height = 384, 384
+    width, height = 256, 256
     print("SIZE", width, height)
     testbed.fov_axis = 0
     testbed.fov = 40
@@ -178,7 +178,7 @@ def optimize_pose(
         #     1,
         # ]
         p = x[:3]
-        euler = [0, 0, 0]  # x[3:6]  # * 0.01
+        euler = x[3:6]  # * 0.01
 
         # q =  w, x, y, z
         rot = transforms3d.euler.euler2mat(euler[0], euler[1], euler[2], "szyx")
@@ -187,15 +187,22 @@ def optimize_pose(
         DT[:3, 3] = p
         return DT
 
+    optim_counter = 0
+
     def pose_optimizer(x):
-        nonlocal rotational_weight, T_end
+        nonlocal rotational_weight, T_end, optim_counter
 
         # print(x)
         # Render current pose
         DT = convert_to_pose(x)
+
+        # OBJECT POSE
         current = np.dot(np.linalg.inv(T_end), DT)  # Transforms3DUtils.translation(x)
         current = np.linalg.inv(current)
+
+        # CAMERA POSE
         # current = np.dot(T_end, DT)
+
         end_image = render_frame(current, height, width)
 
         blend = 0.5 * (start_image + end_image)
@@ -221,7 +228,12 @@ def optimize_pose(
             matches = bf.knnMatch(des1, des2, k=2)
             # Apply ratio test
             good = []
+            max_distance = 0.0
             for m, n in matches:
+                if m.distance > max_distance:
+                    max_distance = m.distance
+                if n.distance > max_distance:
+                    max_distance = n.distance
                 if m.distance < 0.6 * n.distance:
                     good.append([m])
 
@@ -229,9 +241,13 @@ def optimize_pose(
             for g in good:
                 p1 = np.array(kp1[g[0].queryIdx].pt)
                 p2 = np.array(kp2[g[0].trainIdx].pt)
-                match_distances += np.linalg.norm(p1 - p2) * (1 / g[0].distance)
+                norm_distance = max_distance / g[0].distance
+
+                match_distances += (np.linalg.norm(p1 - p2) * (1 / norm_distance)) ** 2
 
             match_distances /= len(good)
+
+            match_distances += 10 * max((100 - len(good)) / 100, 0)
 
             if len(good) == 0:
                 return np.inf
@@ -247,11 +263,18 @@ def optimize_pose(
             )
             cv2.imshow("matches", img3)
             cv2.imshow("stack", stack)
-            cv2.waitKey(1)
+            k = cv2.waitKey(1)
+            if ord("q") == k:
+                sys.exit(0)
 
             fitness = match_distances
-            print("F", fitness)
 
+            if optim_counter > 1500:
+                fitness += 1000 * np.abs(start_image - end_image).mean()
+
+            print("F", fitness, f"({optim_counter})")
+
+            optim_counter += 1
             return fitness
         except:
             return np.inf
