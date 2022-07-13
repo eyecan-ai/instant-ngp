@@ -39,7 +39,7 @@ class Transforms3DUtils(object):
         return T
 
 
-class FrameWriter:
+class PoseWriter:
     def __init__(self, output_folder: str):
         self.active = False
         self.counter = 0
@@ -48,13 +48,11 @@ class FrameWriter:
             self.output_folder.mkdir(parents=True, exist_ok=True)
             self.active = True
 
-    def __call__(self, frame: np.ndarray):
+    def __call__(self, pose: np.ndarray):
         if self.active:
-            filename = self.output_folder / f"{self.counter:05d}.png"
-            rich.print(
-                "Frame saved to", filename, frame.min(), frame.max(), frame.dtype
-            )
-            cv2.imwrite(str(filename), frame)
+            filename = self.output_folder / f"{self.counter:05d}_pose.txt"
+            rich.print("Frame saved to", filename)
+            np.savetxt(str(filename), pose)
             self.counter += 1
 
 
@@ -80,7 +78,7 @@ def navigate_neural_twin(
     import json
     import cv2
 
-    wr = FrameWriter(output_folder)
+    pose_writer = PoseWriter(output_folder)
 
     # Selecting mode
     mode = ngp.TestbedMode.Nerf
@@ -154,8 +152,7 @@ def navigate_neural_twin(
                     break
                 elif isinstance(action, str):
                     if action == "save_pose":
-                        np.savetxt("/tmp/pose.txt", T)
-                        print("Pose saved to:", "/tmp/pose.txt")
+                        pose_writer(T)
                     elif action == "quit":
                         print("Quitting")
                         sys.exit(0)
@@ -176,7 +173,6 @@ def navigate_neural_twin(
             np.uint8
         )
         cv2.imshow("rgb", output_image)
-        wr(output_image)
 
 
 if __name__ == "__main__":

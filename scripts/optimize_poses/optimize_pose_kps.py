@@ -7,6 +7,7 @@ import transforms3d
 import cv2
 import nevergrad as ng
 import sys
+import albumentations as A
 
 sys.path.append("core")
 
@@ -205,6 +206,8 @@ def optimize_pose(
     ngp_build_folder: Path = t.Option("build", help="Folder in which Instant is built"),
     fov: float = t.Option(40.0, help="Field of View"),
     output_folder: str = t.Option("", help="Output folder"),
+    epochs: int = t.Option(3000, help="Number of epochs"),
+    warmap_epochs: int = t.Option(200, help="Number of epochs for warmap"),
 ):
     import sys
 
@@ -259,6 +262,7 @@ def optimize_pose(
     print("SIZE", width, height)
     testbed.fov_axis = 0
     testbed.fov = fov
+    # testbed.exposure = 1
 
     def render_frame(T: np.ndarray, height: int, width: int):
         testbed.set_nerf_camera_matrix(T[:-1, :])
@@ -271,9 +275,17 @@ def optimize_pose(
 
     start_image = render_frame(T_start, height, width)
 
-    # start_image = (
-    #     imageio.imread("/home/daniele/Downloads/00035_marker.png")[:, :, :3] / 255.0
-    # ).astype(np.float32)
+    # LOAD START IMAGE FROM FILE
+    start_image = (
+        imageio.imread(
+            "/home/daniele/Desktop/experiments/2022-07-07.NerfExperiments/datasets/lucas_candles/nerf/images/00012_marker_0010.png"
+        )[:, :, :3]
+        / 255.0
+    ).astype(np.float32)
+
+    t = A.Compose([A.CenterCrop(500, 500), A.Resize(width, height)])
+    start_image = t(image=start_image)["image"]
+
     target_image = render_frame(T_end, height, width)
 
     OUTPUT = lambda x: cv2.cvtColor(x, cv2.COLOR_RGB2BGR)
@@ -348,7 +360,7 @@ def optimize_pose(
                     max_distance = m.distance
                 if n.distance > max_distance:
                     max_distance = n.distance
-                if m.distance < 0.6 * n.distance:
+                if m.distance < 0.5 * n.distance:
                     good.append([m])
 
             match_distances = 0.0
@@ -361,7 +373,8 @@ def optimize_pose(
 
             match_distances /= len(good)
 
-            match_distances += 10 * max((100 - len(good)) / 100, 0)
+            n_match = 100
+            match_distances += 100000 * max((n_match - len(good)) / n_match, 0)
 
             if len(good) == 0:
                 return np.inf
@@ -386,10 +399,10 @@ def optimize_pose(
 
             fitness = match_distances
 
-            if optim_counter > 800:
+            if optim_counter > warmap_epochs:
                 fitness += 1000 * np.abs(start_image - end_image).mean()
 
-            print("F", fitness, f"({optim_counter})")
+            print("F", fitness, f"({optim_counter})", optim_counter > warmap_epochs)
 
             optim_counter += 1
             return fitness
@@ -398,8 +411,8 @@ def optimize_pose(
         # return (start_image - end_image).mean()
 
     rotational_weight = 1
-    rotational_bound = rotational_weight * np.pi * 2
-    translational_bound = 3
+    rotational_bound = rotational_weight * np.pi * 12
+    translational_bound = 5
 
     # Choose optimizer -> https://facebookresearch.github.io/nevergrad/optimization.html#choosing-an-optimizer
     # optimizer = ng.optimizers.CMA(
@@ -424,7 +437,7 @@ def optimize_pose(
             # method="tanh",
             method="bouncing",
         ),
-        budget=3000,
+        budget=epochs,
     )
 
     while True:
