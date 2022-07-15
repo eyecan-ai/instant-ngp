@@ -3,6 +3,7 @@ import numpy as np
 import transforms3d
 import math
 import quaternion
+import random
 
 
 class EasingBase:
@@ -195,16 +196,24 @@ class TrajectoryInterpolator:
         easing: EasingBase = LinearInOut(),
         flyby_steps: int = 100,
         waypoint_steps: int = 100,
+        randomimize_trajectory: bool = False,
     ) -> None:
         self._poses = poses
         self._flyby_steps = flyby_steps
         self._waypoint_steps = waypoint_steps
         self._easing = easing
 
+        if randomimize_trajectory:
+            first = self._poses[0]
+            last = self._poses[-1]
+            middles = self._poses[1:-1].copy()
+            random.shuffle(middles)
+            self._poses = [first] + middles + [last]
+
         self._trajectory = []
-        for i in range(len(poses) - 1):
-            T0 = poses[i]
-            T1 = poses[i + 1]
+        for i in range(len(self._poses) - 1):
+            T0 = self._poses[i]
+            T1 = self._poses[i + 1]
             chunk = self._interpolate(
                 T0,
                 T1,

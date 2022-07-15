@@ -44,6 +44,9 @@ def navigate_neural_twin(
     ngp_build_folder: Path = t.Option("build", help="Folder in which Instant is built"),
     fov: float = t.Option(60.0, help="Field of View"),
     resolution: int = t.Option(1024, help="Resolution of the rendered image"),
+    randomize_trajectory: bool = t.Option(
+        False, help="Randomize trajectory but first/last waypoint"
+    ),
     output_folder: str = t.Option(
         "", help="Folder in which to save the rendered images"
     ),
@@ -73,11 +76,12 @@ def navigate_neural_twin(
         flyby_steps=100,
         waypoint_steps=50,
         easing=QuadEaseInOut(),
+        randomimize_trajectory=randomize_trajectory,
     )
     trajectory = interpolator.build_trajectory()
 
     testbed.load_snapshot(str(neural_twin_file))
-    testbed.background_color = [0.000, 0.000, 0.000, 1.000]
+    testbed.background_color = np.array([33, 33, 33, 255]) / 255.0
     testbed.exposure = 0
     testbed.sun_dir = [0.577, 0.577, 0.577]
     testbed.up_dir = [0.000, 1.000, 0.000]
