@@ -207,7 +207,7 @@ def optimize_pose(
     fov: float = t.Option(40.0, help="Field of View"),
     output_folder: str = t.Option("", help="Output folder"),
     epochs: int = t.Option(3000, help="Number of epochs"),
-    warmap_epochs: int = t.Option(200, help="Number of epochs for warmap"),
+    warmup_epochs: int = t.Option(5000, help="Number of epochs for warmup"),
 ):
     import sys
 
@@ -286,6 +286,7 @@ def optimize_pose(
 
     # t = A.Compose([A.CenterCrop(500, 500), A.Resize(width, height)])
     t = A.Compose([A.RandomCrop(1000, 1000), A.Resize(width, height)])
+
     start_image = t(image=start_image)["image"]
 
     target_image = render_frame(T_end, height, width)
@@ -357,26 +358,52 @@ def optimize_pose(
             # Apply ratio test
             good = []
             max_distance = 0.0
+            ratio_decay = 0.8  # max(0.5, 0.9999**optim_counter)
+            print("ratio decay", ratio_decay)
             for m, n in matches:
                 if m.distance > max_distance:
                     max_distance = m.distance
                 if n.distance > max_distance:
                     max_distance = n.distance
-                if m.distance < 0.5 * n.distance:
+                if m.distance < ratio_decay * n.distance:
                     good.append([m])
 
             match_distances = 0.0
+
+            size_loss = 0
+            cosine_loss = 0
+            distance_loss = 0
             for g in good:
-                p1 = np.array(kp1[g[0].queryIdx].pt)
-                p2 = np.array(kp2[g[0].trainIdx].pt)
+                k1 = kp1[g[0].queryIdx]
+                k2 = kp2[g[0].trainIdx]
+                p1 = np.array(k1.pt)
+                p2 = np.array(k2.pt)
+                d1 = np.array(
+                    [np.cos(np.deg2rad(k1.angle)), np.sin(np.deg2rad(k1.angle))]
+                )
+                d2 = np.array(
+                    [np.cos(np.deg2rad(k2.angle)), np.sin(np.deg2rad(k2.angle))]
+                )
+                # print("MATCH sizes", k1.size, k2.size)
+
+                size_loss += 0 * np.abs(k1.size - k2.size)
+
+                cosine_loss += 0 * (1 - np.dot(d1, d2))
+
                 norm_distance = max_distance / g[0].distance
+                distance_loss += 10 * np.linalg.norm(p1 - p2) / g[0].distance
 
-                match_distances += (np.linalg.norm(p1 - p2) * (1 / norm_distance)) ** 2
+            size_loss /= len(good)
+            cosine_loss /= len(good)
+            distance_loss /= len(good)
 
-            match_distances /= len(good)
+            print("LOSSES", size_loss, cosine_loss, distance_loss)
+            fitness = size_loss + cosine_loss + distance_loss
+
+            # match_distances = np.sqrt(match_distances)
 
             n_match = 100
-            match_distances += 100000 * max((n_match - len(good)) / n_match, 0)
+            # match_distances += 100000 * max((n_match - len(good)) / n_match, 0)
 
             if len(good) == 0:
                 return np.inf
@@ -393,22 +420,22 @@ def optimize_pose(
 
             cv2.imshow("matches", img3)
             cv2.imshow("stack", stack)
-            wr((stack * 255).astype(np.uint8))
+            # wr((stack * 255).astype(np.uint8))
+
+            # if optim_counter > warmup_epochs:
+            #     fitness += 1 * np.abs(start_image - end_image).mean()
+
+            print("F", fitness, f"({optim_counter})", optim_counter > warmup_epochs)
+            optim_counter += 1
 
             k = cv2.waitKey(1)
             if ord("q") == k:
                 sys.exit(0)
 
-            fitness = match_distances
-
-            if optim_counter > warmap_epochs:
-                fitness += 0.1 * np.abs(start_image - end_image).mean()
-
-            print("F", fitness, f"({optim_counter})", optim_counter > warmap_epochs)
-
-            optim_counter += 1
             return fitness
-        except:
+
+        except Exception as e:
+            print("E", e)
             return np.inf
         # return (start_image - end_image).mean()
 
